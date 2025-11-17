@@ -346,6 +346,112 @@ function extractPRBenefits(pr) {
 }
 
 /**
+ * Detect notable PRs for highlights section
+ */
+function detectNotablePRs(userData) {
+  const allPRs = [];
+
+  // Collect all PRs with user info
+  userData.forEach(user => {
+    user.created.forEach(pr => {
+      allPRs.push({
+        ...pr,
+        username: user.username
+      });
+    });
+  });
+
+  const notable = {
+    veryLarge: [],
+    critical: [],
+    security: [],
+    features: []
+  };
+
+  allPRs.forEach(pr => {
+    const title = pr.title.toLowerCase();
+    const body = (pr.body || '').toLowerCase();
+
+    // Very large PRs
+    if (pr.complexity?.level === 'Very Large' && pr.merged) {
+      notable.veryLarge.push(pr);
+    }
+
+    // Critical fixes
+    if ((title.includes('critical') || title.includes('urgent') ||
+         title.includes('hotfix') || body.includes('critical')) && pr.merged) {
+      notable.critical.push(pr);
+    }
+
+    // Security fixes
+    if ((title.includes('security') || title.includes('vulnerability') ||
+         title.includes('cve') || body.includes('security')) && pr.merged) {
+      notable.security.push(pr);
+    }
+
+    // New features
+    if ((title.includes('feature') || title.includes('feat:') ||
+         title.includes('add') || body.includes('new feature')) && pr.merged) {
+      notable.features.push(pr);
+    }
+  });
+
+  return notable;
+}
+
+/**
+ * Rank contributors by different metrics
+ */
+function rankContributors(userData) {
+  const rankings = {
+    byPRs: [],
+    byCodeImpact: [],
+    byReviews: [],
+    byMergeRate: []
+  };
+
+  userData.forEach(user => {
+    const mergedCount = user.created.filter(pr => pr.merged).length;
+    const codeImpact = user.created.reduce((sum, pr) =>
+      sum + (pr.stats?.totalChanges || 0), 0);
+    const mergeRate = user.created.length > 0
+      ? (mergedCount / user.created.length) * 100
+      : 0;
+
+    rankings.byPRs.push({
+      username: user.username,
+      count: user.created.length,
+      merged: mergedCount
+    });
+
+    rankings.byCodeImpact.push({
+      username: user.username,
+      impact: codeImpact,
+      prs: user.created.length
+    });
+
+    rankings.byReviews.push({
+      username: user.username,
+      count: user.reviewed.length
+    });
+
+    rankings.byMergeRate.push({
+      username: user.username,
+      rate: mergeRate,
+      total: user.created.length
+    });
+  });
+
+  // Sort each ranking
+  rankings.byPRs.sort((a, b) => b.count - a.count);
+  rankings.byCodeImpact.sort((a, b) => b.impact - a.impact);
+  rankings.byReviews.sort((a, b) => b.count - a.count);
+  rankings.byMergeRate.sort((a, b) => b.rate - a.rate);
+
+  return rankings;
+}
+
+/**
  * Generate markdown report
  */
 function generateReport(userData, startDate, endDate) {
@@ -386,6 +492,87 @@ function generateReport(userData, startDate, endDate) {
   report += `- **Average PR Size:** ${avgPRSize.toLocaleString()} lines changed\n\n`;
 
   report += `---\n\n`;
+
+  // Highlights Section
+  if (totalCreated > 0) {
+    const notable = detectNotablePRs(userData);
+    const rankings = rankContributors(userData);
+
+    report += `## 🏆 Highlights\n\n`;
+
+    // Notable PRs
+    let hasNotable = false;
+
+    if (notable.critical.length > 0) {
+      hasNotable = true;
+      report += `### 🚨 Critical Fixes\n\n`;
+      notable.critical.slice(0, 3).forEach(pr => {
+        report += `- **${pr.title}** by @${pr.username}\n`;
+        report += `  - [#${pr.number}](${pr.url}) in ${pr.repo}\n`;
+        report += `  - ${pr.complexity?.emoji || ''} ${pr.stats?.totalChanges.toLocaleString() || 0} lines changed\n\n`;
+      });
+    }
+
+    if (notable.security.length > 0) {
+      hasNotable = true;
+      report += `### 🔒 Security Enhancements\n\n`;
+      notable.security.slice(0, 3).forEach(pr => {
+        report += `- **${pr.title}** by @${pr.username}\n`;
+        report += `  - [#${pr.number}](${pr.url}) in ${pr.repo}\n`;
+        report += `  - ${pr.complexity?.emoji || ''} ${pr.stats?.totalChanges.toLocaleString() || 0} lines changed\n\n`;
+      });
+    }
+
+    if (notable.features.length > 0) {
+      hasNotable = true;
+      report += `### ✨ New Features\n\n`;
+      notable.features.slice(0, 3).forEach(pr => {
+        report += `- **${pr.title}** by @${pr.username}\n`;
+        report += `  - [#${pr.number}](${pr.url}) in ${pr.repo}\n`;
+        report += `  - ${pr.complexity?.emoji || ''} ${pr.stats?.totalChanges.toLocaleString() || 0} lines changed\n\n`;
+      });
+    }
+
+    if (notable.veryLarge.length > 0) {
+      hasNotable = true;
+      report += `### 🔴 Major Changes (Very Large PRs)\n\n`;
+      notable.veryLarge.slice(0, 3).forEach(pr => {
+        report += `- **${pr.title}** by @${pr.username}\n`;
+        report += `  - [#${pr.number}](${pr.url}) in ${pr.repo}\n`;
+        report += `  - 🔴 Very Large: ${pr.stats?.totalChanges.toLocaleString() || 0} lines changed across ${pr.stats?.changedFiles || 0} files\n\n`;
+      });
+    }
+
+    // Top Contributors
+    report += `### 🌟 Top Contributors\n\n`;
+
+    // Most Productive (by PRs)
+    if (rankings.byPRs.length > 0 && rankings.byPRs[0].count > 0) {
+      const top = rankings.byPRs[0];
+      report += `- **Most Active:** @${top.username} (${top.count} PR${top.count > 1 ? 's' : ''} created, ${top.merged} merged)\n`;
+    }
+
+    // Biggest Code Impact
+    if (rankings.byCodeImpact.length > 0 && rankings.byCodeImpact[0].impact > 0) {
+      const top = rankings.byCodeImpact[0];
+      report += `- **Largest Impact:** @${top.username} (${top.impact.toLocaleString()} lines changed across ${top.prs} PR${top.prs > 1 ? 's' : ''})\n`;
+    }
+
+    // Top Reviewer
+    if (rankings.byReviews.length > 0 && rankings.byReviews[0].count > 0) {
+      const top = rankings.byReviews[0];
+      report += `- **Top Reviewer:** @${top.username} (${top.count} review${top.count > 1 ? 's' : ''})\n`;
+    }
+
+    // Best Merge Rate (only if they have at least 2 PRs)
+    const qualifiedMergers = rankings.byMergeRate.filter(r => r.total >= 2);
+    if (qualifiedMergers.length > 0 && qualifiedMergers[0].rate === 100) {
+      const top = qualifiedMergers[0];
+      report += `- **Perfect Merge Rate:** @${top.username} (${top.total}/${top.total} PRs merged)\n`;
+    }
+
+    report += `\n---\n\n`;
+  }
 
   // Individual User Reports
   userData.forEach(user => {
