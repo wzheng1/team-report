@@ -22,7 +22,7 @@ A Node.js tool to generate comprehensive reports of GitHub pull request activity
 1. **Clone or navigate to the project directory**
 
 ```bash
-cd weeklyreport
+cd team-report
 ```
 
 2. **Install dependencies**
@@ -90,12 +90,12 @@ node generateReport.js
 
 **2. Report for specific users (last 3 weeks)**
 ```bash
-node generateReport.js -u "jan--f,marioferh,machine424" -p 3w
+node generateReport.js -u "user1,user2" -p 3w
 ```
 
 **3. Report for a single user (last month)**
 ```bash
-node generateReport.js -u "octocat" -p 1m
+node generateReport.js -u "user1" -p 1m
 ```
 
 **4. Report for users in custom file (last quarter)**
@@ -128,11 +128,9 @@ node generateReport.js -u "user1,user2" -o "myorg" -p 1m --output org-monthly.md
 Create a `github_users` file with one GitHub username per line:
 
 ```
-jan--f
-marioferh
-machine424
-simonpasquier
-slashpai
+user1
+user2
+user3
 ```
 
 Lines that are empty or contain only whitespace will be ignored.
@@ -200,7 +198,7 @@ This report provides an overview of GitHub pull request activity for 10 contribu
 
 ---
 
-## jan--f
+## user1
 
 ### Summary
 
