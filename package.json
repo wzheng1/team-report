@@ -1,0 +1,27 @@
+{
+  "name": "weeklyreport",
+  "version": "1.0.0",
+  "description": "GitHub PR Activity Report Generator - Generate comprehensive reports of pull requests created and reviewed by users",
+  "main": "generateReport.js",
+  "scripts": {
+    "report": "node generateReport.js",
+    "report:week": "node generateReport.js -p 7d",
+    "report:3weeks": "node generateReport.js -p 3w",
+    "report:month": "node generateReport.js -p 1m",
+    "report:quarter": "node generateReport.js -p 3m"
+  },
+  "keywords": [
+    "github",
+    "pull-request",
+    "report",
+    "pr-review",
+    "activity-report"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@octokit/rest": "^22.0.1",
+    "commander": "^14.0.2",
+    "dotenv": "^17.2.3"
+  }
+}
