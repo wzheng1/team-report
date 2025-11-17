@@ -22,5 +22,6 @@ Thumbs.db
 *.swo
 *~
 
-# Output files (optional - uncomment if you don't want to commit reports)
-# report.md
+# Output files - generated reports should not be committed
+report.md
+*.md.report
