@@ -452,15 +452,60 @@ function rankContributors(userData) {
 }
 
 /**
+ * Generate team summary table for condensed reports
+ */
+function generateTeamSummaryTable(userData) {
+  let table = `| Contributor | PRs | Merged | Open | Reviews | Lines Changed | Avg Size | Top Complexity |\n`;
+  table += `|-------------|-----|--------|------|---------|---------------|----------|----------------|\n`;
+
+  userData.forEach(user => {
+    const mergedCount = user.created.filter(pr => pr.merged).length;
+    const openCount = user.created.filter(pr => pr.state === 'open').length;
+    const totalChanges = user.created.reduce((sum, pr) => sum + (pr.stats?.totalChanges || 0), 0);
+    const avgSize = user.created.length > 0 ? Math.round(totalChanges / user.created.length) : 0;
+
+    // Find most common complexity level
+    const complexityCount = {
+      'Very Large': user.created.filter(pr => pr.complexity?.level === 'Very Large').length,
+      'Large': user.created.filter(pr => pr.complexity?.level === 'Large').length,
+      'Medium': user.created.filter(pr => pr.complexity?.level === 'Medium').length,
+      'Small': user.created.filter(pr => pr.complexity?.level === 'Small').length
+    };
+
+    let topComplexity = '';
+    const maxCount = Math.max(...Object.values(complexityCount));
+    if (maxCount > 0) {
+      if (complexityCount['Very Large'] === maxCount) topComplexity = '🔴 VL (' + complexityCount['Very Large'] + ')';
+      else if (complexityCount['Large'] === maxCount) topComplexity = '🟠 L (' + complexityCount['Large'] + ')';
+      else if (complexityCount['Medium'] === maxCount) topComplexity = '🟡 M (' + complexityCount['Medium'] + ')';
+      else topComplexity = '🟢 S (' + complexityCount['Small'] + ')';
+    } else {
+      topComplexity = '-';
+    }
+
+    table += `| ${user.username} | ${user.created.length} | ${mergedCount} | ${openCount} | ${user.reviewed.length} | ${totalChanges.toLocaleString()} | ${avgSize.toLocaleString()} | ${topComplexity} |\n`;
+  });
+
+  return table;
+}
+
+/**
  * Generate markdown report
  */
-function generateReport(userData, startDate, endDate) {
+function generateReport(userData, startDate, endDate, condensed = false) {
   const formattedStart = startDate.toISOString().split('T')[0];
   const formattedEnd = endDate.toISOString().split('T')[0];
 
   let report = `# GitHub Pull Request Activity Report\n\n`;
   report += `**Period:** ${formattedStart} to ${formattedEnd}\n\n`;
   report += `**Generated:** ${new Date().toISOString().split('T')[0]}\n\n`;
+
+  if (condensed) {
+    report += `**Format:** Condensed (Manager Summary)\n\n`;
+    report += `> 📌 This is a condensed report focusing on key metrics and highlights.\n`;
+    report += `> For detailed PR listings, run without the --condensed flag.\n\n`;
+  }
+
   report += `---\n\n`;
 
   // Executive Summary
@@ -574,7 +619,19 @@ function generateReport(userData, startDate, endDate) {
     report += `\n---\n\n`;
   }
 
+  // Team Summary Table (for condensed reports)
+  if (condensed && totalCreated > 0) {
+    report += `## 📋 Team Summary\n\n`;
+    report += generateTeamSummaryTable(userData);
+    report += `\n---\n\n`;
+  }
+
   // Individual User Reports
+  if (condensed) {
+    // Condensed individual summaries
+    report += `## 👥 Individual Summaries\n\n`;
+  }
+
   userData.forEach(user => {
     report += `## ${user.username}\n\n`;
 
@@ -615,8 +672,34 @@ function generateReport(userData, startDate, endDate) {
 
     report += `\n`;
 
-    // Created PRs
-    if (user.created.length > 0) {
+    // Add condensed key work summary
+    if (condensed && user.created.length > 0) {
+      // Find notable PRs for this user
+      const veryLargePRs = user.created.filter(pr => pr.complexity?.level === 'Very Large' && pr.merged);
+      const features = user.created.filter(pr => {
+        const title = pr.title.toLowerCase();
+        return (title.includes('feature') || title.includes('feat:') || title.includes('add')) && pr.merged;
+      });
+
+      if (veryLargePRs.length > 0 || features.length > 0) {
+        report += `**Key Work:**\n`;
+        if (veryLargePRs.length > 0) {
+          const topPR = veryLargePRs[0];
+          report += `- Major change: ${topPR.title} (${topPR.stats?.totalChanges.toLocaleString() || 0} lines)\n`;
+        }
+        if (features.length > 0 && features.length <= 3) {
+          features.forEach(pr => {
+            report += `- ${pr.title}\n`;
+          });
+        } else if (features.length > 3) {
+          report += `- ${features.length} new features delivered\n`;
+        }
+        report += `\n`;
+      }
+    }
+
+    // Created PRs (skip detailed listings in condensed mode)
+    if (!condensed && user.created.length > 0) {
       report += `### Pull Requests Created\n\n`;
 
       user.created.forEach((pr, index) => {
@@ -654,8 +737,8 @@ function generateReport(userData, startDate, endDate) {
       });
     }
 
-    // Reviewed PRs
-    if (user.reviewed.length > 0) {
+    // Reviewed PRs (skip detailed listings in condensed mode)
+    if (!condensed && user.reviewed.length > 0) {
       report += `### Pull Requests Reviewed\n\n`;
       report += `${user.username} provided reviews for ${user.reviewed.length} pull request(s):\n\n`;
 
@@ -701,6 +784,7 @@ async function main() {
     .option('-p, --period <period>', 'Time period (e.g., 7d, 3w, 1m, or YYYY-MM-DD..YYYY-MM-DD)', '7d')
     .option('-o, --org <org>', 'Filter by GitHub organization')
     .option('--output <path>', 'Output file path (default: report.md)', 'report.md')
+    .option('--condensed', 'Generate condensed report (manager-friendly, without detailed PR listings)')
     .parse(process.argv);
 
   const options = program.opts();
@@ -754,11 +838,14 @@ async function main() {
   await logRateLimit('Final ');
 
   // Generate report
-  const report = generateReport(userData, startDate, endDate);
+  const report = generateReport(userData, startDate, endDate, options.condensed);
 
   // Save report
   fs.writeFileSync(options.output, report);
   console.log(`\nReport generated successfully: ${options.output}`);
+  if (options.condensed) {
+    console.log('Format: Condensed (manager-friendly summary)');
+  }
 }
 
 // Run the script
