@@ -12,6 +12,99 @@ const octokit = new Octokit({
 });
 
 /**
+ * Check GitHub API rate limit status
+ */
+async function checkRateLimit() {
+  try {
+    const { data } = await octokit.rateLimit.get();
+    const { remaining, limit, reset } = data.rate;
+    const resetDate = new Date(reset * 1000);
+
+    return {
+      remaining,
+      limit,
+      reset: resetDate,
+      resetIn: Math.ceil((resetDate - new Date()) / 1000 / 60) // minutes
+    };
+  } catch (error) {
+    console.warn('Could not check rate limit:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Log rate limit status
+ */
+async function logRateLimit(prefix = '') {
+  const rateLimit = await checkRateLimit();
+  if (rateLimit) {
+    console.log(`${prefix}Rate limit: ${rateLimit.remaining}/${rateLimit.limit} remaining`);
+    if (rateLimit.remaining < 100) {
+      console.warn(`⚠️  Warning: Low rate limit! Resets in ${rateLimit.resetIn} minutes`);
+    }
+  }
+}
+
+/**
+ * Wait for rate limit to reset
+ */
+async function waitForRateLimit() {
+  const rateLimit = await checkRateLimit();
+  if (rateLimit && rateLimit.remaining === 0) {
+    const waitMinutes = rateLimit.resetIn + 1; // Add 1 minute buffer
+    console.log(`\n⏳ Rate limit exceeded. Waiting ${waitMinutes} minutes until reset...`);
+    console.log(`   Reset time: ${rateLimit.reset.toLocaleString()}`);
+
+    // Wait for rate limit to reset
+    await new Promise(resolve => setTimeout(resolve, waitMinutes * 60 * 1000));
+    console.log('✓ Rate limit reset. Resuming...\n');
+  }
+}
+
+/**
+ * Execute a function with rate limit handling and retry logic
+ */
+async function withRateLimit(fn, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      // Check if we're close to rate limit
+      const rateLimit = await checkRateLimit();
+      if (rateLimit && rateLimit.remaining < 10) {
+        console.log('⚠️  Approaching rate limit, waiting before next request...');
+        await waitForRateLimit();
+      }
+
+      return await fn();
+    } catch (error) {
+      // Check if it's a rate limit error
+      if (error.status === 403 && error.message.includes('rate limit')) {
+        console.log(`\n⚠️  Rate limit error encountered (attempt ${attempt}/${retries})`);
+        await waitForRateLimit();
+
+        if (attempt === retries) {
+          throw new Error('Rate limit exceeded and max retries reached');
+        }
+        continue;
+      }
+
+      // Check for other retryable errors (network issues, timeouts)
+      if (error.status >= 500 || error.code === 'ETIMEDOUT' || error.code === 'ECONNRESET') {
+        console.log(`⚠️  Temporary error (${error.message}), retrying in 5 seconds... (attempt ${attempt}/${retries})`);
+        await new Promise(resolve => setTimeout(resolve, 5000));
+
+        if (attempt === retries) {
+          throw error;
+        }
+        continue;
+      }
+
+      // Non-retryable error, throw immediately
+      throw error;
+    }
+  }
+}
+
+/**
  * Read users from github_users file
  */
 function readUsersFromFile(filePath = './github_users') {
@@ -62,7 +155,64 @@ function calculateDateRange(period) {
 }
 
 /**
+ * Fetch detailed PR statistics (additions, deletions, changed files)
+ */
+async function fetchPRStats(owner, repo, prNumber) {
+  try {
+    const { data } = await withRateLimit(async () => {
+      return await octokit.pulls.get({
+        owner,
+        repo,
+        pull_number: prNumber
+      });
+    });
+
+    return {
+      additions: data.additions || 0,
+      deletions: data.deletions || 0,
+      changedFiles: data.changed_files || 0,
+      commits: data.commits || 0
+    };
+  } catch (error) {
+    // If we can't fetch stats, return zeros instead of failing
+    console.warn(`  Could not fetch stats for PR #${prNumber}: ${error.message}`);
+    return {
+      additions: 0,
+      deletions: 0,
+      changedFiles: 0,
+      commits: 0
+    };
+  }
+}
+
+/**
+ * Calculate PR complexity indicator
+ */
+function calculateComplexity(stats) {
+  const totalChanges = stats.additions + stats.deletions;
+  const files = stats.changedFiles;
+
+  // Complexity scoring:
+  // - Small: < 100 lines, < 5 files
+  // - Medium: < 500 lines, < 15 files
+  // - Large: < 1000 lines, < 30 files
+  // - Very Large: >= 1000 lines or >= 30 files
+
+  if (totalChanges < 100 && files < 5) {
+    return { level: 'Small', emoji: '🟢', score: 1 };
+  } else if (totalChanges < 500 && files < 15) {
+    return { level: 'Medium', emoji: '🟡', score: 2 };
+  } else if (totalChanges < 1000 && files < 30) {
+    return { level: 'Large', emoji: '🟠', score: 3 };
+  } else {
+    return { level: 'Very Large', emoji: '🔴', score: 4 };
+  }
+}
+
+/**
  * Fetch all PRs created by a user across all repos
+ * Uses pagination to fetch all results (not limited to 100)
+ * Includes rate limit handling and retry logic
  */
 async function fetchCreatedPRs(username, startDate, endDate, org = null) {
   const query = org
@@ -70,24 +220,52 @@ async function fetchCreatedPRs(username, startDate, endDate, org = null) {
     : `author:${username} is:pr created:${startDate.toISOString().split('T')[0]}..${endDate.toISOString().split('T')[0]}`;
 
   try {
-    const result = await octokit.search.issuesAndPullRequests({
-      q: query,
-      per_page: 100,
-      sort: 'created',
-      order: 'desc'
+    // Use withRateLimit wrapper for automatic rate limit handling
+    const allPRs = await withRateLimit(async () => {
+      return await octokit.paginate(
+        octokit.search.issuesAndPullRequests,
+        {
+          q: query,
+          per_page: 100,
+          sort: 'created',
+          order: 'desc'
+        },
+        (response) => response.data
+      );
     });
 
-    return result.data.items.map(pr => ({
-      title: pr.title,
-      number: pr.number,
-      url: pr.html_url,
-      repo: pr.repository_url.split('/').slice(-2).join('/'),
-      state: pr.state,
-      createdAt: pr.created_at,
-      closedAt: pr.closed_at,
-      merged: pr.pull_request?.merged_at ? true : false,
-      body: pr.body || ''
-    }));
+    // Fetch detailed stats for each PR
+    const prsWithStats = [];
+    for (const pr of allPRs) {
+      const repoPath = pr.repository_url.split('/').slice(-2);
+      const [owner, repo] = repoPath;
+
+      // Fetch PR stats
+      const stats = await fetchPRStats(owner, repo, pr.number);
+      const complexity = calculateComplexity(stats);
+
+      prsWithStats.push({
+        title: pr.title,
+        number: pr.number,
+        url: pr.html_url,
+        repo: `${owner}/${repo}`,
+        state: pr.state,
+        createdAt: pr.created_at,
+        closedAt: pr.closed_at,
+        merged: pr.pull_request?.merged_at ? true : false,
+        body: pr.body || '',
+        stats: {
+          additions: stats.additions,
+          deletions: stats.deletions,
+          changedFiles: stats.changedFiles,
+          commits: stats.commits,
+          totalChanges: stats.additions + stats.deletions
+        },
+        complexity
+      });
+    }
+
+    return prsWithStats;
   } catch (error) {
     console.error(`Error fetching created PRs for ${username}:`, error.message);
     return [];
@@ -96,6 +274,8 @@ async function fetchCreatedPRs(username, startDate, endDate, org = null) {
 
 /**
  * Fetch all PRs reviewed by a user
+ * Uses pagination to fetch all results (not limited to 100)
+ * Includes rate limit handling and retry logic
  */
 async function fetchReviewedPRs(username, startDate, endDate, org = null) {
   const query = org
@@ -103,14 +283,21 @@ async function fetchReviewedPRs(username, startDate, endDate, org = null) {
     : `reviewed-by:${username} is:pr created:${startDate.toISOString().split('T')[0]}..${endDate.toISOString().split('T')[0]}`;
 
   try {
-    const result = await octokit.search.issuesAndPullRequests({
-      q: query,
-      per_page: 100,
-      sort: 'created',
-      order: 'desc'
+    // Use withRateLimit wrapper for automatic rate limit handling
+    const allPRs = await withRateLimit(async () => {
+      return await octokit.paginate(
+        octokit.search.issuesAndPullRequests,
+        {
+          q: query,
+          per_page: 100,
+          sort: 'created',
+          order: 'desc'
+        },
+        (response) => response.data
+      );
     });
 
-    return result.data.items.map(pr => ({
+    return allPRs.map(pr => ({
       title: pr.title,
       number: pr.number,
       url: pr.html_url,
@@ -175,6 +362,15 @@ function generateReport(userData, startDate, endDate) {
   const totalReviewed = userData.reduce((sum, user) => sum + user.reviewed.length, 0);
   const totalMerged = userData.reduce((sum, user) => sum + user.created.filter(pr => pr.merged).length, 0);
 
+  // Calculate code change stats
+  const totalAdditions = userData.reduce((sum, user) =>
+    sum + user.created.reduce((s, pr) => s + (pr.stats?.additions || 0), 0), 0);
+  const totalDeletions = userData.reduce((sum, user) =>
+    sum + user.created.reduce((s, pr) => s + (pr.stats?.deletions || 0), 0), 0);
+  const totalFilesChanged = userData.reduce((sum, user) =>
+    sum + user.created.reduce((s, pr) => s + (pr.stats?.changedFiles || 0), 0), 0);
+  const avgPRSize = totalCreated > 0 ? Math.round((totalAdditions + totalDeletions) / totalCreated) : 0;
+
   report += `## Executive Summary\n\n`;
   report += `This report provides an overview of GitHub pull request activity for ${userData.length} contributor(s) during the specified period.\n\n`;
   report += `### Key Metrics\n\n`;
@@ -182,6 +378,12 @@ function generateReport(userData, startDate, endDate) {
   report += `- **Total PRs Merged:** ${totalMerged}\n`;
   report += `- **Total PRs Reviewed:** ${totalReviewed}\n`;
   report += `- **Merge Rate:** ${totalCreated > 0 ? ((totalMerged / totalCreated) * 100).toFixed(1) : 0}%\n\n`;
+
+  report += `### Code Changes\n\n`;
+  report += `- **Total Lines Added:** ${totalAdditions.toLocaleString()}\n`;
+  report += `- **Total Lines Deleted:** ${totalDeletions.toLocaleString()}\n`;
+  report += `- **Total Files Changed:** ${totalFilesChanged.toLocaleString()}\n`;
+  report += `- **Average PR Size:** ${avgPRSize.toLocaleString()} lines changed\n\n`;
 
   report += `---\n\n`;
 
@@ -193,12 +395,38 @@ function generateReport(userData, startDate, endDate) {
     const mergedCount = user.created.filter(pr => pr.merged).length;
     const openCount = user.created.filter(pr => pr.state === 'open').length;
 
+    // Calculate user's code stats
+    const userAdditions = user.created.reduce((s, pr) => s + (pr.stats?.additions || 0), 0);
+    const userDeletions = user.created.reduce((s, pr) => s + (pr.stats?.deletions || 0), 0);
+    const userFilesChanged = user.created.reduce((s, pr) => s + (pr.stats?.changedFiles || 0), 0);
+    const userAvgPRSize = user.created.length > 0 ? Math.round((userAdditions + userDeletions) / user.created.length) : 0;
+
+    // Calculate complexity distribution
+    const complexityDist = {
+      small: user.created.filter(pr => pr.complexity?.level === 'Small').length,
+      medium: user.created.filter(pr => pr.complexity?.level === 'Medium').length,
+      large: user.created.filter(pr => pr.complexity?.level === 'Large').length,
+      veryLarge: user.created.filter(pr => pr.complexity?.level === 'Very Large').length
+    };
+
     report += `### Summary\n\n`;
     report += `- **PRs Created:** ${user.created.length}\n`;
     report += `  - Merged: ${mergedCount}\n`;
     report += `  - Open: ${openCount}\n`;
     report += `  - Closed: ${user.created.length - mergedCount - openCount}\n`;
-    report += `- **PRs Reviewed:** ${user.reviewed.length}\n\n`;
+    report += `- **PRs Reviewed:** ${user.reviewed.length}\n`;
+
+    if (user.created.length > 0) {
+      report += `\n**Code Statistics:**\n`;
+      report += `- **Lines Added:** ${userAdditions.toLocaleString()}\n`;
+      report += `- **Lines Deleted:** ${userDeletions.toLocaleString()}\n`;
+      report += `- **Files Changed:** ${userFilesChanged.toLocaleString()}\n`;
+      report += `- **Average PR Size:** ${userAvgPRSize.toLocaleString()} lines\n`;
+      report += `\n**PR Complexity Distribution:**\n`;
+      report += `- 🟢 Small: ${complexityDist.small} | 🟡 Medium: ${complexityDist.medium} | 🟠 Large: ${complexityDist.large} | 🔴 Very Large: ${complexityDist.veryLarge}\n`;
+    }
+
+    report += `\n`;
 
     // Created PRs
     if (user.created.length > 0) {
@@ -215,6 +443,16 @@ function generateReport(userData, startDate, endDate) {
         report += `- **Created:** ${new Date(pr.createdAt).toISOString().split('T')[0]}\n`;
         if (pr.closedAt) {
           report += `- **Closed:** ${new Date(pr.closedAt).toISOString().split('T')[0]}\n`;
+        }
+
+        // Add PR stats if available
+        if (pr.stats) {
+          report += `- **Complexity:** ${pr.complexity?.emoji || ''} ${pr.complexity?.level || 'Unknown'}\n`;
+          report += `- **Changes:** +${pr.stats.additions.toLocaleString()} / -${pr.stats.deletions.toLocaleString()} lines\n`;
+          report += `- **Files Changed:** ${pr.stats.changedFiles}\n`;
+          if (pr.stats.commits) {
+            report += `- **Commits:** ${pr.stats.commits}\n`;
+          }
         }
 
         report += `\n**Introduction:**\n`;
@@ -302,6 +540,10 @@ async function main() {
   const { startDate, endDate } = calculateDateRange(options.period);
   console.log(`Period: ${startDate.toISOString().split('T')[0]} to ${endDate.toISOString().split('T')[0]}`);
 
+  // Check initial rate limit status
+  console.log('');
+  await logRateLimit('Initial ');
+
   // Fetch data for each user
   const userData = [];
   for (const username of users) {
@@ -319,6 +561,10 @@ async function main() {
       reviewed
     });
   }
+
+  // Check final rate limit status
+  console.log('');
+  await logRateLimit('Final ');
 
   // Generate report
   const report = generateReport(userData, startDate, endDate);

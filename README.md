@@ -127,6 +127,13 @@ node generateReport.js -u "user1,user2" -o "myorg" -p 1m --output org-monthly.md
 
 Create a `github_users` file with one GitHub username per line:
 
+```bash
+# Copy the example file
+cp github_users.example github_users
+```
+
+Then edit `github_users` and add your team members:
+
 ```
 user1
 user2
